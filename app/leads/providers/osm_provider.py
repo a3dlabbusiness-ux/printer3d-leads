@@ -29,7 +29,14 @@ from app.leads.providers.base import LeadProvider, RawLead
 logger = logging.getLogger(__name__)
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+# Più server pubblici Overpass, mantenuti da organizzazioni diverse: se il primo
+# è sovraccarico o in timeout, proviamo automaticamente i successivi.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
 
 USER_AGENT = "Printer3DLeadsBot/1.0 (contact: a3dlabbusiness@gmail.com)"
 
@@ -104,14 +111,25 @@ class OsmProvider(LeadProvider):
         query = self._build_query(lat, lon, category, max_results)
 
         headers = {"User-Agent": USER_AGENT}
-        try:
-            with httpx.Client(timeout=self.timeout, headers=headers) as client:
-                resp = client.post(OVERPASS_URL, data={"data": query})
-                resp.raise_for_status()
-                data = resp.json()
-        except httpx.HTTPError as exc:
-            logger.error("Errore chiamata Overpass API: %s", exc)
-            raise
+        data = None
+        last_error: Optional[Exception] = None
+
+        for overpass_url in OVERPASS_URLS:
+            try:
+                with httpx.Client(timeout=self.timeout, headers=headers) as client:
+                    resp = client.post(overpass_url, data={"data": query})
+                    resp.raise_for_status()
+                    data = resp.json()
+                logger.info("OsmProvider: risposta ricevuta da %s", overpass_url)
+                break
+            except httpx.HTTPError as exc:
+                logger.warning("OsmProvider: %s non disponibile (%s), provo il prossimo...", overpass_url, exc)
+                last_error = exc
+                continue
+
+        if data is None:
+            logger.error("OsmProvider: tutti i server Overpass non disponibili: %s", last_error)
+            raise last_error
 
         results: List[RawLead] = []
         for element in data.get("elements", [])[:max_results]:
