@@ -1,6 +1,8 @@
 """
 Invio email tramite SMTP (provider email legittimo configurato dall'utente,
-es. Gmail, provider aziendale, SendGrid SMTP, ecc).
+es. Gmail, provider aziendale, SendGrid SMTP, ecc) — oppure, se configurata,
+tramite l'API HTTPS di Brevo, che bypassa i blocchi di porta SMTP applicati
+di default da molti provider cloud (es. DigitalOcean).
 
 Nessuna tecnica di spoofing, nessuna rotazione di account: un solo mittente
 configurato in .env, esattamente come dichiarato nel campo EMAIL_FROM.
@@ -11,6 +13,8 @@ import logging
 import smtplib
 import socket
 from email.message import EmailMessage as MimeEmailMessage
+
+import httpx
 
 from app.config import settings
 
@@ -35,7 +39,43 @@ class SmtpSendError(Exception):
     pass
 
 
+def _send_via_brevo_api(to_email: str, subject: str, body: str) -> None:
+    """Invia tramite l'API HTTPS di Brevo (porta 443, mai bloccata dai provider cloud)."""
+    if not settings.email_from:
+        raise SmtpSendError("EMAIL_FROM non configurato nel file .env.")
+
+    payload = {
+        "sender": {
+            "email": settings.email_from,
+            "name": settings.email_from_name or settings.email_from,
+        },
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "textContent": body,
+    }
+    headers = {
+        "api-key": settings.brevo_api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    try:
+        with httpx.Client(timeout=20) as client:
+            resp = client.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers)
+        if resp.status_code >= 400:
+            logger.error("Errore invio Brevo API verso %s: %s %s", to_email, resp.status_code, resp.text)
+            raise SmtpSendError(f"Brevo API errore {resp.status_code}: {resp.text[:200]}")
+    except httpx.HTTPError as exc:
+        logger.error("Errore di rete verso Brevo API per %s: %s", to_email, exc)
+        raise SmtpSendError(str(exc)) from exc
+
+
 def send_email(to_email: str, subject: str, body: str) -> None:
+    # Se è configurata una API key Brevo, usa quella (HTTPS, niente blocchi di porta).
+    if settings.brevo_api_key:
+        _send_via_brevo_api(to_email, subject, body)
+        return
+
     if not settings.smtp_host or not settings.smtp_username or not settings.smtp_password:
         raise SmtpSendError(
             "Configurazione SMTP incompleta: controlla SMTP_HOST, SMTP_USERNAME, "
