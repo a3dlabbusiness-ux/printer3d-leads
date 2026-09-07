@@ -114,28 +114,30 @@ async def send_lead_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int, lead:
     draft = lead_service.get_active_draft(session, lead)
 
     lines = [
-        "🆕 *NUOVO POTENZIALE CLIENTE*",
+        "🆕 NUOVO POTENZIALE CLIENTE",
         "",
-        f"*Nome:* {lead.name}",
-        f"*Categoria:* {lead.category or '-'}",
-        f"*Città:* {lead.city or '-'}",
-        f"*Sito:* {lead.website or '-'}",
-        f"*Email:* {lead.email or '⚠️ non trovata'}",
-        f"*Telefono:* {lead.phone or '-'}",
-        f"*Fonte:* {lead.source.name if lead.source else '-'}",
+        f"Nome: {lead.name}",
+        f"Categoria: {lead.category or '-'}",
+        f"Città: {lead.city or '-'}",
+        f"Sito: {lead.website or '-'}",
+        f"Email: {lead.email or '⚠️ non trovata'}",
+        f"Telefono: {lead.phone or '-'}",
+        f"Fonte: {lead.source.name if lead.source else '-'}",
         "",
-        f"*Motivo interesse:* {lead.site_analysis or 'analisi non disponibile'}",
+        f"Motivo interesse: {lead.site_analysis or 'analisi non disponibile'}",
     ]
 
     if draft:
-        lines += ["", "*PROPOSTA EMAIL*", "", f"*Oggetto:* {draft.subject}", "", draft.body]
+        lines += ["", "PROPOSTA EMAIL", "", f"Oggetto: {draft.subject}", "", draft.body]
     else:
         lines += ["", "⚠️ Nessuna bozza email disponibile (email non trovata)."]
 
     text = "\n".join(lines)
     keyboard = lead_review_keyboard(lead.id, website=lead.website)
 
-    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=keyboard)
+    # Niente parse_mode Markdown qui: i dati del lead (nome, indirizzo, testo AI)
+    # sono variabili e potrebbero contenere caratteri che rompono il parser di Telegram.
+    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
 
 
 async def on_lead_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,8 +172,7 @@ async def on_lead_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_reply_markup(reply_markup=None)
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"✅ *{lead.name}* approvato e in coda di invio.",
-                    parse_mode="Markdown",
+                    text=f"✅ {lead.name} approvato e in coda di invio.",
                 )
             except ValueError as exc:
                 await query.answer(str(exc), show_alert=True)
@@ -213,10 +214,9 @@ async def on_lead_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=(
-                    f"✏️ Invia ora il nuovo testo dell'email per *{lead.name}*.\n"
+                    f"✏️ Invia ora il nuovo testo dell'email per {lead.name}.\n"
                     "Formato: prima riga = oggetto, righe successive = corpo del messaggio."
                 ),
-                parse_mode="Markdown",
             )
 
         session.flush()
@@ -229,7 +229,7 @@ MENU_BUTTON_ACTIONS = {
     "🚫 Blacklist": "cmd_blacklist",
     "⚙️ Impostazioni": "cmd_settings",
     "⏸ Pausa invii": "cmd_pause",
-    "▶ Riprendi invii": "cmd_resume",
+    "▶️ Riprendi invii": "cmd_resume",
     "❓ Aiuto": "cmd_help",
 }
 
@@ -268,7 +268,7 @@ async def on_edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not subject or not body:
         await update.message.reply_text(
-            "⚠ Formato non valido. Prima riga = oggetto, resto = corpo. Riprova."
+            "⚠️ Formato non valido. Prima riga = oggetto, resto = corpo. Riprova."
         )
         return
 
@@ -329,7 +329,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         by_cat = stats_service.get_stats_by_category(session)
 
     lines = [
-        "📊 *Statistiche generali*",
+        "📊 Statistiche generali",
         f"Lead trovati: {g.leads_found}",
         f"Lead approvati: {g.leads_approved}",
         f"Email inviate: {g.emails_sent}",
@@ -344,11 +344,11 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     if by_cat:
-        lines += ["", "*Per categoria:*"]
+        lines += ["", "Per categoria:"]
         for cat, cs in by_cat.items():
             lines.append(f"{cat}: {cs.contacted} contatti, {cs.replies} risposte, {cs.clients} clienti")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,7 +361,7 @@ async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("La coda email è vuota.")
         return
     lines = [f"- {m.to_email} ({m.lead.name if m.lead else '?'})" for m in queued]
-    await update.message.reply_text("📬 *Coda email:*\n" + "\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("📬 Coda email:\n" + "\n".join(lines))
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,7 +381,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nessuna email inviata oggi.")
         return
     lines = [f"- {m.to_email} ({m.lead.name if m.lead else '?'}) alle {m.sent_at.strftime('%H:%M')}" for m in sent_today]
-    await update.message.reply_text("📧 *Inviate oggi:*\n" + "\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("📧 Inviate oggi:\n" + "\n".join(lines))
 
 
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,7 +394,7 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nessun lead trovato finora.")
         return
     lines = [f"- {l.name} ({l.city}) — stato: {l.status.value}" for l in recent]
-    await update.message.reply_text("🕓 *Ultimi lead:*\n" + "\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("🕓 Ultimi lead:\n" + "\n".join(lines))
 
 
 async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -407,7 +407,7 @@ async def cmd_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("La blacklist è vuota.")
         return
     lines = [f"- [{b.identifier_type}] {b.identifier_value}" for b in rows]
-    await update.message.reply_text("🚫 *Blacklist:*\n" + "\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("🚫 Blacklist:\n" + "\n".join(lines))
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -420,7 +420,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         paused = queue_service.is_paused(session)
 
     lines = [
-        "⚙ *Impostazioni correnti*",
+        "⚙️ Impostazioni correnti",
         f"Provider ricerca: {app_settings.lead_provider}",
         f"Provider AI: {app_settings.ai_provider}",
         f"Città/provincia default: {app_settings.default_city}/{app_settings.default_province}",
@@ -430,7 +430,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Fascia oraria invio: {app_settings.sending_hour_start}:00-{app_settings.sending_hour_end}:00",
         f"Invii in pausa: {'sì' if paused else 'no'}",
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -449,3 +449,4 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_session() as session:
         queue_service.set_paused(session, False)
     await update.message.reply_text("▶️ Invii riattivati.")
+
