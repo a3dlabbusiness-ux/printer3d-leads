@@ -1,30 +1,33 @@
 """
-paginegialle_scraper.py
-Cerca attività su PagineGialle.it e prova a estrarre email diretta
-dalla scheda, o in fallback il sito web (da passare poi a email_scraper.py).
+Provider basato su PagineGialle.it (scraping pagina di ricerca).
 
-Richiede:
-    pip install requests beautifulsoup4 --break-system-packages
-
-NOTA IMPORTANTE:
-Questo è scraping di un sito pubblico, non un'API ufficiale.
-- Rispetta pause tra le richieste (REQUEST_DELAY_SECONDS)
-- La struttura HTML del sito può cambiare nel tempo: se lo script
-  smette di trovare risultati, va aggiornato il parsing (i selettori
-  CSS/HTML in _parse_listing_page)
-- Uso consigliato: contatti B2B per proposte commerciali, con volumi
-  contenuti (decine, non migliaia, di richieste al giorno)
-
-Uso base:
-    from paginegialle_scraper import search_paginegialle
-    results = search_paginegialle("bar", "Catania", max_results=20)
+NOTE IMPORTANTI:
+- Il numero di telefono su PagineGialle è offuscato nell'HTML e viene
+  ricomposto solo via JavaScript lato browser: non è estraibile in modo
+  affidabile con semplice scraping, quindi qui il campo phone resta
+  SEMPRE None (rispettando la regola in base.py: mai inventare dati).
+- Il sito web esterno dell'attività NON è quasi mai presente nella
+  scheda di ricerca; a volte è nella pagina di dettaglio. Qui proviamo
+  a cercarlo anche lì, ma il tasso di successo è basso: questo provider
+  è quindi più debole per l'email (che dipende dal sito) rispetto a OSM.
+- Se la struttura HTML del sito cambia, i selettori sotto vanno
+  aggiornati (vedi i log di ricerca precedenti nel repo per il debug).
 """
 
+from __future__ import annotations
+
+import logging
 import re
 import time
+from typing import List, Optional
+from urllib.parse import quote
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import quote
+
+from app.leads.providers.base import LeadProvider, RawLead
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.paginegialle.it"
 SEARCH_URL_TEMPLATE = BASE_URL + "/ricerca/{category}/{city}"
@@ -35,132 +38,110 @@ HEADERS = {
                   "Chrome/120.0.0.0 Safari/537.36"
 }
 
-REQUEST_DELAY_SECONDS = 2.0  # pausa tra una pagina e l'altra
-EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+REQUEST_DELAY_SECONDS = 1.5
 
 
-def _parse_listing_page(html: str) -> list[dict]:
-    """
-    Estrae le schede attività da una pagina di risultati PagineGialle.
-    Ritorna lista di dict con: name, address, phone, website, detail_url
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
+class PagineGialleProvider(LeadProvider):
+    name: str = "paginegialle"
 
-    # Le schede risultato sono in elementi con classe "list-element"
-    # (verificare periodicamente che il selettore sia ancora valido)
-    cards = soup.select("div.list-element")
+    def search(
+        self,
+        city: str,
+        category: str,
+        province: Optional[str] = None,
+        max_results: int = 20,
+        keywords: Optional[str] = None,
+    ) -> List[RawLead]:
+        url = SEARCH_URL_TEMPLATE.format(
+            category=quote(category.lower()),
+            city=quote(city.lower()),
+        )
 
-    for card in cards:
-        name_el = card.select_one("h2 a, .titleFirstLine")
-        if not name_el:
-            continue
-        name = name_el.get_text(strip=True)
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.error("PagineGialleProvider: errore richiesta a %s: %s", url, e)
+            return []
 
-        detail_url = None
-        link_el = card.select_one("a[href]")
-        if link_el and link_el.get("href", "").startswith("http"):
-            detail_url = link_el["href"]
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select("div.search-itm")[:max_results]
 
-        address_el = card.select_one(".description-fields, .address")
-        address = address_el.get_text(strip=True) if address_el else ""
+        results: List[RawLead] = []
 
-        phone_el = card.select_one("a[href^='tel:']")
-        phone = phone_el["href"].replace("tel:", "") if phone_el else None
+        for card in cards:
+            name = self._extract_name(card)
+            if not name:
+                continue
 
-        website_el = card.select_one("a[href^='http']:not([href*='paginegialle.it'])")
-        website = website_el["href"] if website_el else None
+            address = self._extract_text(card, ".search-itm__adr")
+            detail_url = self._extract_detail_url(card)
 
-        results.append({
-            "name": name,
-            "address": address,
-            "phone": phone,
-            "website": website,
-            "detail_url": detail_url,
-        })
+            website = None
+            if detail_url:
+                website = self._find_external_website(detail_url)
+                time.sleep(REQUEST_DELAY_SECONDS)
 
-    return results
+            results.append(
+                RawLead(
+                    name=name,
+                    category=category,
+                    city=city,
+                    province=province,
+                    address=address,
+                    website=website,
+                    phone=None,  # offuscato via JS, non estraibile in modo affidabile
+                    email=None,  # praticamente mai presente direttamente
+                    source_name=self.name,
+                )
+            )
 
+        logger.info(
+            "PagineGialleProvider: trovati %d risultati per '%s' a '%s'",
+            len(results), category, city,
+        )
+        return results
 
-def _extract_email_from_detail_page(detail_url: str) -> str | None:
-    """Visita la pagina scheda dell'attività e cerca un'email diretta."""
-    try:
-        resp = requests.get(detail_url, headers=HEADERS, timeout=15)
-        if resp.status_code != 200:
+    # -----------------------------------------------------------------
+    # Helper interni
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _extract_name(card) -> Optional[str]:
+        h2 = card.select_one("h2")
+        if not h2:
             return None
-    except requests.RequestException:
+        # Il testo dell'h2 a volte include la categoria concatenata
+        # (es. "Bar Caffe'Desirèe"): teniamo il testo grezzo, è comunque
+        # meglio di niente; se serve pulizia ulteriore va affinata qui.
+        return h2.get_text(strip=True) or None
+
+    @staticmethod
+    def _extract_text(card, selector: str) -> Optional[str]:
+        el = card.select_one(selector)
+        return el.get_text(strip=True) if el else None
+
+    @staticmethod
+    def _extract_detail_url(card) -> Optional[str]:
+        a = card.select_one("a[href^='http']")
+        if a and BASE_URL in a.get("href", ""):
+            return a["href"]
         return None
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    @staticmethod
+    def _find_external_website(detail_url: str) -> Optional[str]:
+        """Cerca un link esterno (sito web reale) nella pagina di dettaglio."""
+        try:
+            resp = requests.get(detail_url, headers=HEADERS, timeout=15)
+            if resp.status_code != 200:
+                return None
+        except requests.RequestException:
+            return None
 
-    # 1) Link mailto: (più affidabile)
-    mailto = soup.select_one("a[href^='mailto:']")
-    if mailto:
-        email = mailto["href"].replace("mailto:", "").split("?")[0].strip()
-        if email:
-            return email
-
-    # 2) Fallback: regex sul testo della pagina
-    matches = EMAIL_REGEX.findall(resp.text)
-    if matches:
-        return matches[0]
-
-    return None
-
-
-def search_paginegialle(category: str, city: str, max_results: int = 20) -> list[dict]:
-    """
-    Cerca attività su PagineGialle per categoria e città.
-    Per ogni risultato prova a recuperare l'email diretta dalla scheda.
-    Ritorna lista di dict: name, address, phone, website, email (può essere None)
-    """
-    url = SEARCH_URL_TEMPLATE.format(
-        category=quote(category.lower()),
-        city=quote(city.lower()),
-    )
-
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"Errore nella ricerca PagineGialle: {e}")
-        return []
-
-    # DEBUG temporaneo: mostra cosa ha risposto il sito, per capire perché
-    # non troviamo schede. Rimuovi queste righe una volta risolto.
-    print(f"[DEBUG] URL richiesto: {url}")
-    print(f"[DEBUG] Status code: {resp.status_code}")
-    print(f"[DEBUG] Lunghezza HTML ricevuto: {len(resp.text)} caratteri")
-    with open("/tmp/paginegialle_debug.html", "w", encoding="utf-8") as f:
-        f.write(resp.text)
-    print("[DEBUG] HTML salvato in /tmp/paginegialle_debug.html per ispezione")
-
-    listings = _parse_listing_page(resp.text)[:max_results]
-    results = []
-
-    for item in listings:
-        email = None
-        if item.get("detail_url"):
-            email = _extract_email_from_detail_page(item["detail_url"])
-            time.sleep(REQUEST_DELAY_SECONDS)
-
-        item["email"] = email
-        results.append(item)
-
-    return results
-
-
-if __name__ == "__main__":
-    import sys
-    category = sys.argv[1] if len(sys.argv) > 1 else "bar"
-    city = sys.argv[2] if len(sys.argv) > 2 else "Catania"
-    n = int(sys.argv[3]) if len(sys.argv) > 3 else 10
-
-    print(f"Cerco: {category} a {city} (max {n})\n")
-    for r in search_paginegialle(category, city, max_results=n):
-        print(f"- {r['name']}")
-        print(f"  Indirizzo: {r['address']}")
-        print(f"  Telefono:  {r.get('phone')}")
-        print(f"  Sito:      {r.get('website')}")
-        print(f"  Email:     {r.get('email')}")
-        print()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for a in soup.select("a[href^='http']"):
+            href = a["href"]
+            if "paginegialle.it" in href or "wa.me" in href or "whatsapp" in href:
+                continue
+            return href
+        return None
