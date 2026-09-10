@@ -194,7 +194,8 @@ def _overpass_query(lat: float, lon: float, category: str, radius_m: int = 8000)
     );
     out center tags;
     """
-    resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=30)
+    resp = requests.post(OVERPASS_URL, data={"data": query},
+                          headers={"User-Agent": "A3DLabLeadBot/1.0"}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
 
