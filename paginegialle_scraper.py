@@ -126,6 +126,15 @@ def search_paginegialle(category: str, city: str, max_results: int = 20) -> list
         print(f"Errore nella ricerca PagineGialle: {e}")
         return []
 
+    # DEBUG temporaneo: mostra cosa ha risposto il sito, per capire perché
+    # non troviamo schede. Rimuovi queste righe una volta risolto.
+    print(f"[DEBUG] URL richiesto: {url}")
+    print(f"[DEBUG] Status code: {resp.status_code}")
+    print(f"[DEBUG] Lunghezza HTML ricevuto: {len(resp.text)} caratteri")
+    with open("/tmp/paginegialle_debug.html", "w", encoding="utf-8") as f:
+        f.write(resp.text)
+    print("[DEBUG] HTML salvato in /tmp/paginegialle_debug.html per ispezione")
+
     listings = _parse_listing_page(resp.text)[:max_results]
     results = []
 
